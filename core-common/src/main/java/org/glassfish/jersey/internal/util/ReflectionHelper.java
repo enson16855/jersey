@@ -1,7 +1,7 @@
 /*
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
- * Copyright (c) 2010-2015 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010-2017 Oracle and/or its affiliates. All rights reserved.
  *
  * The contents of this file are subject to the terms of either the GNU
  * General Public License Version 2 only ("GPL") or the Common Development
@@ -64,11 +64,14 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 import javax.ws.rs.core.GenericEntity;
 import javax.ws.rs.core.GenericType;
@@ -77,10 +80,6 @@ import org.glassfish.jersey.internal.LocalizationMessages;
 import org.glassfish.jersey.internal.OsgiRegistry;
 import org.glassfish.jersey.internal.util.collection.ClassTypePair;
 
-import jersey.repackaged.com.google.common.base.Function;
-import jersey.repackaged.com.google.common.collect.Collections2;
-import jersey.repackaged.com.google.common.collect.Lists;
-import jersey.repackaged.com.google.common.collect.Sets;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
@@ -511,13 +510,9 @@ public final class ReflectionHelper {
             return Collections.emptyList();
         }
 
-        return Lists.newArrayList(Collections2.transform(Arrays.asList(types), new Function<Type, Class<?>>() {
-
-            @Override
-            public Class<?> apply(final Type input) {
-                return erasure(input);
-            }
-        }));
+        return Arrays.stream(types)
+                     .map((Function<Type, Class<?>>) ReflectionHelper::erasure)
+                     .collect(Collectors.toList());
     }
 
     /**
@@ -549,13 +544,9 @@ public final class ReflectionHelper {
             return Collections.emptyList();
         }
 
-        return Lists.newArrayList(Collections2.transform(Arrays.asList(types), new Function<Type, ClassTypePair>() {
-
-            @Override
-            public ClassTypePair apply(final Type input) {
-                return ClassTypePair.of(erasure(input), input);
-            }
-        }));
+        return Arrays.stream(types)
+                     .map(type1 -> ClassTypePair.of(erasure(type1), type1))
+                     .collect(Collectors.toList());
     }
 
     /**
@@ -859,6 +850,29 @@ public final class ReflectionHelper {
     }
 
     /**
+     * Get privileged action to obtain declared constructor of given class with given parameters.
+     * If run using security manager, the returned privileged action must be invoked within a doPrivileged block.
+     *
+     * @param clazz  The class for which to obtain the constructor.
+     * @param params constructor parameters.
+     * @return privileged action to obtain the constructor or {@code null}, when constructor with given parameters
+     * is not found.
+     * @see AccessController#doPrivileged(java.security.PrivilegedAction)
+     */
+    public static PrivilegedAction<Constructor<?>> getDeclaredConstructorPA(final Class<?> clazz, final Class<?>... params) {
+        return new PrivilegedAction<Constructor<?>>() {
+            @Override
+            public Constructor<?> run() {
+                try {
+                    return clazz.getDeclaredConstructor(params);
+                } catch (NoSuchMethodException e) {
+                    return null;
+                }
+            }
+        };
+    }
+
+    /**
      * Returns collection of all annotation types attached to a given annotated element that have the provided meta
      * annotation attached.
      *
@@ -869,7 +883,7 @@ public final class ReflectionHelper {
      */
     public static Collection<Class<? extends Annotation>> getAnnotationTypes(final AnnotatedElement annotatedElement,
                                                                              final Class<? extends Annotation> metaAnnotation) {
-        final Set<Class<? extends Annotation>> result = Sets.newIdentityHashSet();
+        final Set<Class<? extends Annotation>> result = Collections.newSetFromMap(new IdentityHashMap<>());
         for (final Annotation a : annotatedElement.getAnnotations()) {
             final Class<? extends Annotation> aType = a.annotationType();
             if (metaAnnotation == null || aType.getAnnotation(metaAnnotation) != null) {

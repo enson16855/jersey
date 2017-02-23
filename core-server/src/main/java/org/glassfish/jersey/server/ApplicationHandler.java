@@ -1,7 +1,7 @@
 /*
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
- * Copyright (c) 2011-2015 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011-2017 Oracle and/or its affiliates. All rights reserved.
  *
  * The contents of this file are subject to the terms of either the GNU
  * General Public License Version 2 only ("GPL") or the Common Development
@@ -37,27 +37,33 @@
  * only if the new code is made subject to such option by the copyright
  * holder.
  */
+
 package org.glassfish.jersey.server;
 
 import java.io.OutputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
 import java.security.Principal;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
-import javax.inject.Singleton;
 import javax.ws.rs.HttpMethod;
 import javax.ws.rs.NameBinding;
 import javax.ws.rs.RuntimeType;
@@ -77,6 +83,8 @@ import javax.ws.rs.ext.MessageBodyWriter;
 import javax.ws.rs.ext.ReaderInterceptor;
 import javax.ws.rs.ext.WriterInterceptor;
 
+import javax.inject.Singleton;
+
 import org.glassfish.jersey.CommonProperties;
 import org.glassfish.jersey.internal.Errors;
 import org.glassfish.jersey.internal.ServiceConfigurationError;
@@ -86,6 +94,7 @@ import org.glassfish.jersey.internal.inject.Injections;
 import org.glassfish.jersey.internal.inject.JerseyClassAnalyzer;
 import org.glassfish.jersey.internal.inject.ProviderBinder;
 import org.glassfish.jersey.internal.inject.Providers;
+import org.glassfish.jersey.internal.inject.SupplierFactory;
 import org.glassfish.jersey.internal.util.Producer;
 import org.glassfish.jersey.internal.util.ReflectionHelper;
 import org.glassfish.jersey.internal.util.collection.LazyValue;
@@ -128,20 +137,12 @@ import org.glassfish.jersey.server.spi.ContainerResponseWriter;
 import org.glassfish.jersey.server.spi.ExternalRequestScope;
 
 import org.glassfish.hk2.api.DynamicConfiguration;
-import org.glassfish.hk2.api.Factory;
 import org.glassfish.hk2.api.ServiceLocator;
 import org.glassfish.hk2.utilities.Binder;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
 import org.glassfish.hk2.utilities.binding.ScopedBindingBuilder;
 
 import org.jvnet.hk2.external.runtime.ServiceLocatorRuntimeBean;
-
-import jersey.repackaged.com.google.common.base.Function;
-import jersey.repackaged.com.google.common.base.Predicate;
-import jersey.repackaged.com.google.common.collect.Collections2;
-import jersey.repackaged.com.google.common.collect.Lists;
-import jersey.repackaged.com.google.common.collect.Sets;
-import jersey.repackaged.com.google.common.util.concurrent.AbstractFuture;
 
 /**
  * Jersey server-side application handler.
@@ -213,29 +214,19 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
 
     private class ApplicationBinder extends AbstractBinder {
 
-        private class JaxrsApplicationProvider implements Factory<Application> {
+        private class JaxrsApplicationProvider extends SupplierFactory<Application> {
 
             @Override
             public Application provide() {
                 return ApplicationHandler.this.application;
             }
-
-            @Override
-            public void dispose(final Application instance) {
-                //not used
-            }
         }
 
-        private class RuntimeConfigProvider implements Factory<ServerConfig> {
+        private class RuntimeConfigProvider extends SupplierFactory<ServerConfig> {
 
             @Override
             public ServerConfig provide() {
                 return ApplicationHandler.this.runtimeConfig;
-            }
-
-            @Override
-            public void dispose(final ServerConfig instance) {
-                //not used
             }
         }
 
@@ -662,8 +653,12 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         final Set<MessageBodyWriter> messageBodyWriters;
 
         if (LOGGER.isLoggable(Level.FINE)) {
-            messageBodyReaders = Sets.newHashSet(Providers.getAllProviders(locator, MessageBodyReader.class));
-            messageBodyWriters = Sets.newHashSet(Providers.getAllProviders(locator, MessageBodyWriter.class));
+            messageBodyReaders =
+                    StreamSupport.stream(Providers.getAllProviders(locator, MessageBodyReader.class).spliterator(), false)
+                                 .collect(Collectors.toSet());
+            messageBodyWriters =
+                    StreamSupport.stream(Providers.getAllProviders(locator, MessageBodyWriter.class).spliterator(), false)
+                                 .collect(Collectors.toSet());
         } else {
             messageBodyReaders = Providers.getCustomProviders(locator, MessageBodyReader.class);
             messageBodyWriters = Providers.getCustomProviders(locator, MessageBodyWriter.class);
@@ -690,9 +685,9 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         printProviders(LocalizationMessages.LOGGING_DYNAMIC_FEATURES(),
                 processingProviders.getDynamicFeatures(), sb);
         printProviders(LocalizationMessages.LOGGING_MESSAGE_BODY_READERS(),
-                Collections2.transform(messageBodyReaders, new WorkersToStringTransform<MessageBodyReader>()), sb);
+                       messageBodyReaders.stream().map(new WorkersToStringTransform<>()).collect(Collectors.toList()), sb);
         printProviders(LocalizationMessages.LOGGING_MESSAGE_BODY_WRITERS(),
-                Collections2.transform(messageBodyWriters, new WorkersToStringTransform<MessageBodyWriter>()), sb);
+                       messageBodyWriters.stream().map(new WorkersToStringTransform<>()).collect(Collectors.toList()), sb);
 
         LOGGER.log(Level.CONFIG, sb.toString());
     }
@@ -772,7 +767,7 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         final Iterable<RankedProvider<ContainerRequestFilter>> requestFilters = Providers.getAllRankedProviders(locator,
                 ContainerRequestFilter.class);
 
-        final List<RankedProvider<ContainerRequestFilter>> preMatchFilters = Lists.newArrayList();
+        final List<RankedProvider<ContainerRequestFilter>> preMatchFilters = new ArrayList<>();
 
         final MultivaluedMap<Class<? extends Annotation>, RankedProvider<ContainerRequestFilter>> nameBoundReqFilters =
                 filterNameBound(requestFilters, preMatchFilters, componentBag, applicationNameBindings,
@@ -827,8 +822,8 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
             final ResourceBag resourceBag,
             final Iterable<ComponentProvider> componentProviders) {
 
-        final Set<Class<?>> newClasses = Sets.newHashSet();
-        final Set<Object> newInstances = Sets.newHashSet();
+        final Set<Class<?>> newClasses = new HashSet<>();
+        final Set<Object> newInstances = new HashSet<>();
         for (final Resource res : resourceModel.getRootResources()) {
             newClasses.addAll(res.getHandlerClasses());
             newInstances.addAll(res.getHandlerInstances());
@@ -836,12 +831,7 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         newClasses.removeAll(resourceBag.classes);
         newInstances.removeAll(resourceBag.instances);
 
-        final ComponentBag emptyComponentBag = ComponentBag.newInstance(new Predicate<ContractProvider>() {
-            @Override
-            public boolean apply(final ContractProvider input) {
-                return false;
-            }
-        });
+        final ComponentBag emptyComponentBag = ComponentBag.newInstance(input -> false);
         bindProvidersAndResources(componentProviders, emptyComponentBag, newClasses, newInstances);
     }
 
@@ -931,20 +921,17 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         final Set<Class<?>> registeredClasses = runtimeConfig.getRegisteredClasses();
 
         // Merge programmatic resource classes with component classes.
-        final Set<Class<?>> classes = Sets.newIdentityHashSet();
-        classes.addAll(Sets.filter(componentBag.getClasses(ComponentBag.EXCLUDE_META_PROVIDERS),
-                new Predicate<Class<?>>() {
-                    @Override
-                    public boolean apply(final Class<?> componentClass) {
-                        return Providers.checkProviderRuntime(
-                                componentClass,
-                                componentBag.getModel(componentClass),
-                                RuntimeType.SERVER,
-                                !registeredClasses.contains(componentClass),
-                                resourceClasses.contains(componentClass));
-                    }
-                }
-        ));
+        final Set<Class<?>> classes = Collections.newSetFromMap(new IdentityHashMap<>());
+        classes.addAll(componentBag.getClasses(ComponentBag.EXCLUDE_META_PROVIDERS)
+                                   .stream()
+                                   .filter(componentClass -> Providers.checkProviderRuntime(
+                                           componentClass,
+                                           componentBag.getModel(componentClass),
+                                           RuntimeType.SERVER,
+                                           !registeredClasses.contains(componentClass),
+                                           resourceClasses.contains(componentClass))
+                                   )
+                                   .collect(Collectors.toSet()));
         classes.addAll(resourceClasses);
 
         // Bind classes.
@@ -978,21 +965,20 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         }
 
         // Merge programmatic resource instances with other component instances.
-        final Set<Object> instances = Sets.newHashSet();
-        instances.addAll(Sets.filter(componentBag.getInstances(ComponentBag.EXCLUDE_META_PROVIDERS),
-                new Predicate<Object>() {
-                    @Override
-                    public boolean apply(final Object component) {
-                        final Class<?> componentClass = component.getClass();
-                        return Providers.checkProviderRuntime(
-                                componentClass,
-                                componentBag.getModel(componentClass),
-                                RuntimeType.SERVER,
-                                !registeredClasses.contains(componentClass),
-                                resourceInstances.contains(component));
-                    }
-                }
-        ));
+        final Set<Object> instances = new HashSet<>();
+        instances.addAll(componentBag.getInstances(ComponentBag.EXCLUDE_META_PROVIDERS)
+                                     .stream()
+                                     .filter(component -> {
+                                                 final Class<?> componentClass = component.getClass();
+                                                 return Providers.checkProviderRuntime(
+                                                         componentClass,
+                                                         componentBag.getModel(componentClass),
+                                                         RuntimeType.SERVER,
+                                                         !registeredClasses.contains(componentClass),
+                                                         resourceInstances.contains(component));
+                                             }
+                                     )
+                                     .collect(Collectors.toSet()));
         instances.addAll(resourceInstances);
 
         // Bind instances.
@@ -1062,7 +1048,7 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
         return responseFuture;
     }
 
-    private static class FutureResponseWriter extends AbstractFuture<ContainerResponse> implements ContainerResponseWriter {
+    private static class FutureResponseWriter extends CompletableFuture<ContainerResponse> implements ContainerResponseWriter {
 
         private ContainerResponse response = null;
 
@@ -1110,26 +1096,20 @@ public final class ApplicationHandler implements ContainerLifecycleListener {
                     current.setEntity(null);
                 }
                 requestTimeoutHandler.close();
-                super.set(current);
+                super.complete(current);
             }
         }
 
         @Override
         public void failure(final Throwable error) {
             requestTimeoutHandler.close();
-            super.setException(error);
+            super.completeExceptionally(error);
         }
 
         @Override
         public boolean enableResponseBuffering() {
             return true;
         }
-
-        @Override
-        protected void interruptTask() {
-            // TODO implement cancellation logic.
-        }
-
     }
 
     /**

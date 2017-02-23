@@ -1,7 +1,7 @@
 /*
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
- * Copyright (c) 2010-2015 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010-2016 Oracle and/or its affiliates. All rights reserved.
  *
  * The contents of this file are subject to the terms of either the GNU
  * General Public License Version 2 only ("GPL") or the Common Development
@@ -60,7 +60,7 @@ import org.glassfish.grizzly.http.server.ServerConfiguration;
 import org.glassfish.grizzly.ssl.SSLEngineConfigurator;
 import org.glassfish.grizzly.utils.Charsets;
 
-import jersey.repackaged.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.glassfish.jersey.internal.guava.ThreadFactoryBuilder;
 
 /**
  * Factory for creating Grizzly Http Server.
@@ -260,7 +260,7 @@ public final class GrizzlyHttpServerFactory {
 
         final String host = (uri.getHost() == null) ? NetworkListener.DEFAULT_NETWORK_HOST : uri.getHost();
         final int port = (uri.getPort() == -1)
-                ? (secure ? Container.DEFAULT_HTTP_PORT : Container.DEFAULT_HTTPS_PORT)
+                ? (secure ? Container.DEFAULT_HTTPS_PORT : Container.DEFAULT_HTTP_PORT)
                 : uri.getPort();
 
         final NetworkListener listener = new NetworkListener("grizzly", host, port);

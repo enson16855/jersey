@@ -1,7 +1,7 @@
 /*
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
- * Copyright (c) 2012-2015 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012-2017 Oracle and/or its affiliates. All rights reserved.
  *
  * The contents of this file are subject to the terms of either the GNU
  * General Public License Version 2 only ("GPL") or the Common Development
@@ -47,15 +47,20 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import javax.ws.rs.ConstrainedTo;
 import javax.ws.rs.RuntimeType;
@@ -68,14 +73,8 @@ import org.glassfish.jersey.model.internal.RankedProvider;
 import org.glassfish.jersey.spi.Contract;
 
 import org.glassfish.hk2.api.ActiveDescriptor;
-import org.glassfish.hk2.api.Factory;
 import org.glassfish.hk2.api.ServiceHandle;
 import org.glassfish.hk2.api.ServiceLocator;
-
-import jersey.repackaged.com.google.common.base.Function;
-import jersey.repackaged.com.google.common.collect.Collections2;
-import jersey.repackaged.com.google.common.collect.Lists;
-import jersey.repackaged.com.google.common.collect.Sets;
 
 /**
  * Utility class providing a set of utility methods for easier and more type-safe
@@ -111,6 +110,7 @@ public final class Providers {
 
         interfaces.put(javax.ws.rs.client.ClientResponseFilter.class, ProviderRuntime.CLIENT);
         interfaces.put(javax.ws.rs.client.ClientRequestFilter.class, ProviderRuntime.CLIENT);
+        interfaces.put(javax.ws.rs.client.RxInvokerProvider.class, ProviderRuntime.CLIENT);
 
         return interfaces;
     }
@@ -150,28 +150,6 @@ public final class Providers {
     }
 
     private Providers() {
-    }
-
-    /**
-     * Wrap an instance into a HK2 service factory.
-     *
-     * @param <T>      Java type if the contract produced by the provider and factory.
-     * @param instance instance to be wrapped into (and provided by) the factory.
-     * @return HK2 service factory wrapping and providing the instance.
-     */
-    public static <T> Factory<T> factoryOf(final T instance) {
-        return new Factory<T>() {
-
-            @Override
-            public T provide() {
-                return instance;
-            }
-
-            @Override
-            public void dispose(final T instance) {
-                //not used
-            }
-        };
     }
 
     /**
@@ -263,16 +241,11 @@ public final class Providers {
     @SuppressWarnings("TypeMayBeWeakened")
     public static <T> Iterable<T> sortRankedProviders(final RankedComparator<T> comparator,
                                                       final Iterable<RankedProvider<T>> providers) {
-        final List<RankedProvider<T>> rankedProviders = Lists.newArrayList(providers);
 
-        Collections.sort(rankedProviders, comparator);
-
-        return Collections2.transform(rankedProviders, new Function<RankedProvider<T>, T>() {
-            @Override
-            public T apply(final RankedProvider<T> input) {
-                return input.getProvider();
-            }
-        });
+        return StreamSupport.stream(providers.spliterator(), false)
+                            .sorted(comparator)
+                            .map(RankedProvider::getProvider)
+                            .collect(Collectors.toList());
     }
 
     /**
@@ -287,20 +260,12 @@ public final class Providers {
     @SuppressWarnings("TypeMayBeWeakened")
     public static <T> Iterable<T> mergeAndSortRankedProviders(final RankedComparator<T> comparator,
                                                               final Iterable<Iterable<RankedProvider<T>>> providerIterables) {
-        final List<RankedProvider<T>> rankedProviders = Lists.newArrayList();
 
-        for (final Iterable<RankedProvider<T>> providers : providerIterables) {
-            rankedProviders.addAll(Lists.<RankedProvider<T>>newLinkedList(providers));
-        }
-
-        Collections.sort(rankedProviders, comparator);
-
-        return Collections2.transform(rankedProviders, new Function<RankedProvider<T>, T>() {
-            @Override
-            public T apply(final RankedProvider<T> input) {
-                return input.getProvider();
-            }
-        });
+        return StreamSupport.stream(providerIterables.spliterator(), false)
+                            .flatMap(rankedProviders -> StreamSupport.stream(rankedProviders.spliterator(), false))
+                            .sorted(comparator)
+                            .map(RankedProvider::getProvider)
+                            .collect(Collectors.toList());
     }
 
     /**
@@ -387,9 +352,10 @@ public final class Providers {
 
     private static <T> Set<T> getClasses(final Collection<ServiceHandle<T>> hk2Providers) {
         if (hk2Providers.isEmpty()) {
-            return Sets.newLinkedHashSet();
+            return new LinkedHashSet<T>();
         } else {
-            return Sets.newLinkedHashSet(Collections2.transform(hk2Providers, new ProviderToService<T>()));
+            return hk2Providers.stream().map(new ProviderToService<T>())
+                               .collect(Collectors.toCollection(LinkedHashSet::new));
         }
     }
 
@@ -409,11 +375,10 @@ public final class Providers {
                                                 final Comparator<T> comparator) {
         final Collection<ServiceHandle<T>> hk2Providers = getServiceHandles(locator, contract);
         if (hk2Providers.isEmpty()) {
-            return Sets.newTreeSet(comparator);
+            return new TreeSet<T>(comparator);
         } else {
-            final TreeSet<T> set = Sets.newTreeSet(comparator);
-            set.addAll(Collections2.transform(hk2Providers, new ProviderToService<T>()));
-            return set;
+            return hk2Providers.stream().map(new ProviderToService<T>())
+                               .collect(Collectors.toCollection(() -> new TreeSet<T>(comparator)));
         }
     }
 
@@ -426,7 +391,7 @@ public final class Providers {
      * @return set of provider contracts implemented by the given class.
      */
     public static Set<Class<?>> getProviderContracts(final Class<?> clazz) {
-        final Set<Class<?>> contracts = Sets.newIdentityHashSet();
+        final Set<Class<?>> contracts = Collections.newSetFromMap(new IdentityHashMap<>());
         computeProviderContracts(clazz, contracts);
         return contracts;
     }
@@ -665,5 +630,19 @@ public final class Providers {
             }
         }
         return false;
+    }
+
+    /**
+     * Helper function converting a HK2 {@link ServiceHandle service provider} into the
+     * provided service contract instance.
+     *
+     * @param <T> service contract Java type.
+     */
+    private static final class ProviderToService<T> implements Function<ServiceHandle<T>, T> {
+
+        @Override
+        public T apply(ServiceHandle<T> input) {
+            return (input != null) ? input.getService() : null;
+        }
     }
 }

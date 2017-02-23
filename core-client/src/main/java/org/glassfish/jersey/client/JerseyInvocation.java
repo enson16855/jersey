@@ -1,7 +1,7 @@
 /*
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
- * Copyright (c) 2011-2016 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011-2017 Oracle and/or its affiliates. All rights reserved.
  *
  * The contents of this file are subject to the terms of either the GNU
  * General Public License Version 2 only ("GPL") or the Common Development
@@ -45,6 +45,8 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.logging.Logger;
 
@@ -62,10 +64,15 @@ import javax.ws.rs.RedirectionException;
 import javax.ws.rs.ServerErrorException;
 import javax.ws.rs.ServiceUnavailableException;
 import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.client.CompletionStageRxInvoker;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.client.Invocation;
 import javax.ws.rs.client.InvocationCallback;
+import javax.ws.rs.client.NioInvoker;
 import javax.ws.rs.client.ResponseProcessingException;
+import javax.ws.rs.client.RxInvoker;
+import javax.ws.rs.client.RxInvokerProvider;
+import javax.ws.rs.client.SyncInvoker;
 import javax.ws.rs.core.CacheControl;
 import javax.ws.rs.core.Cookie;
 import javax.ws.rs.core.GenericType;
@@ -76,12 +83,11 @@ import javax.ws.rs.core.Response;
 
 import org.glassfish.jersey.client.internal.LocalizationMessages;
 import org.glassfish.jersey.internal.MapPropertiesDelegate;
+import org.glassfish.jersey.internal.inject.Providers;
 import org.glassfish.jersey.internal.util.Producer;
 import org.glassfish.jersey.internal.util.PropertiesHelper;
 import org.glassfish.jersey.internal.util.ReflectionHelper;
 import org.glassfish.jersey.process.internal.RequestScope;
-
-import jersey.repackaged.com.google.common.util.concurrent.SettableFuture;
 
 /**
  * Jersey implementation of {@link javax.ws.rs.client.Invocation JAX-RS client-side
@@ -117,7 +123,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
     private static final Map<String, EntityPresence> METHODS = initializeMap();
 
     private static Map<String, EntityPresence> initializeMap() {
-        final Map<String, EntityPresence> map = new HashMap<String, EntityPresence>();
+        final Map<String, EntityPresence> map = new HashMap<>();
 
         map.put("DELETE", EntityPresence.MUST_BE_NULL);
         map.put("GET", EntityPresence.MUST_BE_NULL);
@@ -464,6 +470,75 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
             requestContext.setProperty(name, value);
             return this;
         }
+
+        @Override
+        public CompletionStageRxInvoker rx() {
+            return new JerseyCompletionStageRxInvoker(this, null);
+        }
+
+        @Override
+        public CompletionStageRxInvoker rx(ExecutorService executorService) {
+            return new JerseyCompletionStageRxInvoker(this, executorService);
+        }
+
+        @Override
+        public <T extends RxInvoker> T rx(Class<T> clazz) {
+            return createRxInvoker(clazz, null);
+        }
+
+        @Override
+        public <T extends RxInvoker> T rx(Class<T> clazz, ExecutorService executorService) {
+            if (executorService == null) {
+                throw new IllegalArgumentException(LocalizationMessages.NULL_INPUT_PARAMETER("executorService"));
+            }
+
+            return createRxInvoker(clazz, executorService);
+        }
+
+        /**
+         * Create {@link RxInvoker} from provided {@code RxInvoker} subclass.
+         * <p>
+         * The method does a lookup for {@link RxInvokerProvider}, which provides given {@code RxInvoker} subclass
+         * and if found, calls {@link RxInvokerProvider#getRxInvoker(SyncInvoker, ExecutorService)}
+         *
+         * @param clazz           {@code RxInvoker} subclass to be created.
+         * @param executorService to be passed to the factory method invocation.
+         * @param <T>             {@code RxInvoker} subclass to be returned.
+         * @return thread safe instance of {@code RxInvoker} subclass.
+         * @throws IllegalStateException when provider for given class is not registered.
+         */
+        private <T extends RxInvoker> T createRxInvoker(Class<? extends RxInvoker> clazz,
+                                                        ExecutorService executorService) {
+            if (clazz == null) {
+                throw new IllegalArgumentException(LocalizationMessages.NULL_INPUT_PARAMETER("clazz"));
+            }
+
+            Iterable<RxInvokerProvider> allProviders = Providers.getAllProviders(
+                    this.requestContext.getServiceLocator(),
+                    RxInvokerProvider.class);
+
+            for (RxInvokerProvider invokerProvider : allProviders) {
+                if (invokerProvider.isProviderFor(clazz)) {
+
+                    RxInvoker rxInvoker = invokerProvider.getRxInvoker(this, executorService);
+
+                    if (rxInvoker == null) {
+                        throw new IllegalStateException(LocalizationMessages.CLIENT_RX_PROVIDER_NULL());
+                    }
+
+                    return (T) rxInvoker;
+                }
+            }
+
+            throw new IllegalStateException(
+                    LocalizationMessages.CLIENT_RX_PROVIDER_NOT_REGISTERED(clazz.getSimpleName()));
+        }
+
+        @Override
+        public NioInvoker nio() {
+            // TODO JAX-RS 2.1: to be implemented
+            throw new UnsupportedOperationException("TODO JAX-RS 2.1: to be implemented");
+        }
     }
 
     private static class AsyncInvoker implements javax.ws.rs.client.AsyncInvoker {
@@ -678,12 +753,9 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
     public Response invoke() throws ProcessingException, WebApplicationException {
         final ClientRuntime runtime = request().getClientRuntime();
         final RequestScope requestScope = runtime.getRequestScope();
-        return requestScope.runInScope(new Producer<Response>() {
-            @Override
-            public Response call() throws ProcessingException {
-                return new InboundJaxrsResponse(runtime.invoke(requestForCall(requestContext)), requestScope);
-            }
-        });
+        return requestScope.runInScope(
+                (Producer<Response>) () -> new InboundJaxrsResponse(runtime.invoke(requestForCall(requestContext)),
+                                                                    requestScope));
     }
 
     @Override
@@ -694,17 +766,14 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
         final ClientRuntime runtime = request().getClientRuntime();
         final RequestScope requestScope = runtime.getRequestScope();
         //noinspection Duplicates
-        return requestScope.runInScope(new Producer<T>() {
-            @Override
-            public T call() throws ProcessingException {
-                try {
-                    return translate(runtime.invoke(requestForCall(requestContext)), requestScope, responseType);
-                } catch (final ProcessingException ex) {
-                    if (ex.getCause() instanceof WebApplicationException) {
-                        throw (WebApplicationException) ex.getCause();
-                    }
-                    throw ex;
+        return requestScope.runInScope(() -> {
+            try {
+                return translate(runtime.invoke(requestForCall(requestContext)), requestScope, responseType);
+            } catch (final ProcessingException ex) {
+                if (ex.getCause() instanceof WebApplicationException) {
+                    throw (WebApplicationException) ex.getCause();
                 }
+                throw ex;
             }
         });
     }
@@ -717,30 +786,27 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
         final ClientRuntime runtime = request().getClientRuntime();
         final RequestScope requestScope = runtime.getRequestScope();
         //noinspection Duplicates
-        return requestScope.runInScope(new Producer<T>() {
-            @Override
-            public T call() throws ProcessingException {
-                try {
-                    return translate(runtime.invoke(requestForCall(requestContext)), requestScope, responseType);
-                } catch (final ProcessingException ex) {
-                    if (ex.getCause() instanceof WebApplicationException) {
-                        throw (WebApplicationException) ex.getCause();
-                    }
-                    throw ex;
+        return requestScope.runInScope(() -> {
+            try {
+                return translate(runtime.invoke(requestForCall(requestContext)), requestScope, responseType);
+            } catch (final ProcessingException ex) {
+                if (ex.getCause() instanceof WebApplicationException) {
+                    throw (WebApplicationException) ex.getCause();
                 }
+                throw ex;
             }
         });
     }
 
     @Override
     public Future<Response> submit() {
-        final SettableFuture<Response> responseFuture = SettableFuture.create();
+        final CompletableFuture<Response> responseFuture = new CompletableFuture<>();
         request().getClientRuntime().submit(requestForCall(requestContext), new ResponseCallback() {
 
             @Override
             public void completed(final ClientResponse response, final RequestScope scope) {
                 if (!responseFuture.isCancelled()) {
-                    responseFuture.set(new InboundJaxrsResponse(response, scope));
+                    responseFuture.complete(new InboundJaxrsResponse(response, scope));
                 } else {
                     response.close();
                 }
@@ -749,7 +815,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
             @Override
             public void failed(final ProcessingException error) {
                 if (!responseFuture.isCancelled()) {
-                    responseFuture.setException(error);
+                    responseFuture.completeExceptionally(error);
                 }
             }
         });
@@ -762,7 +828,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
         if (responseType == null) {
             throw new IllegalArgumentException(LocalizationMessages.RESPONSE_TYPE_IS_NULL());
         }
-        final SettableFuture<T> responseFuture = SettableFuture.create();
+        final CompletableFuture<T> responseFuture = new CompletableFuture<>();
         //noinspection Duplicates
         request().getClientRuntime().submit(requestForCall(requestContext), new ResponseCallback() {
 
@@ -773,7 +839,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
                     return;
                 }
                 try {
-                    responseFuture.set(translate(response, scope, responseType));
+                    responseFuture.complete(translate(response, scope, responseType));
                 } catch (final ProcessingException ex) {
                     failed(ex);
                 }
@@ -785,9 +851,9 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
                     return;
                 }
                 if (error.getCause() instanceof WebApplicationException) {
-                    responseFuture.setException(error.getCause());
+                    responseFuture.completeExceptionally(error.getCause());
                 } else {
-                    responseFuture.setException(error);
+                    responseFuture.completeExceptionally(error);
                 }
             }
         });
@@ -825,7 +891,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
         if (responseType == null) {
             throw new IllegalArgumentException(LocalizationMessages.RESPONSE_TYPE_IS_NULL());
         }
-        final SettableFuture<T> responseFuture = SettableFuture.create();
+        final CompletableFuture<T> responseFuture = new CompletableFuture<>();
         //noinspection Duplicates
         request().getClientRuntime().submit(requestForCall(requestContext), new ResponseCallback() {
 
@@ -837,7 +903,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
                 }
 
                 try {
-                    responseFuture.set(translate(response, scope, responseType));
+                    responseFuture.complete(translate(response, scope, responseType));
                 } catch (final ProcessingException ex) {
                     failed(ex);
                 }
@@ -849,9 +915,9 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
                     return;
                 }
                 if (error.getCause() instanceof WebApplicationException) {
-                    responseFuture.setException(error.getCause());
+                    responseFuture.completeExceptionally(error.getCause());
                 } else {
-                    responseFuture.setException(error);
+                    responseFuture.completeExceptionally(error);
                 }
             }
         });
@@ -905,7 +971,7 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
      * request invocation.
      */
     public <T> Future<T> submit(final GenericType<T> responseType, final InvocationCallback<T> callback) {
-        final SettableFuture<T> responseFuture = SettableFuture.create();
+        final CompletableFuture<T> responseFuture = new CompletableFuture<>();
 
         try {
             final ReflectionHelper.DeclaringClassInterfacePair pair =
@@ -942,11 +1008,11 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
                     final T result;
                     if (callbackParamClass == Response.class) {
                         result = callbackParamClass.cast(new InboundJaxrsResponse(response, scope));
-                        responseFuture.set(result);
+                        responseFuture.complete(result);
                         callback.completed(result);
                     } else if (response.getStatusInfo().getFamily() == Response.Status.Family.SUCCESSFUL) {
                         result = response.readEntity(new GenericType<T>(callbackParamType));
-                        responseFuture.set(result);
+                        responseFuture.complete(result);
                         callback.completed(result);
                     } else {
                         failed(convertToException(new InboundJaxrsResponse(response, scope)));
@@ -957,9 +1023,9 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
                 public void failed(final ProcessingException error) {
                     try {
                         if (error.getCause() instanceof WebApplicationException) {
-                            responseFuture.setException(error.getCause());
+                            responseFuture.completeExceptionally(error.getCause());
                         } else if (!responseFuture.isCancelled()) {
-                            responseFuture.setException(error);
+                            responseFuture.completeExceptionally(error);
                         }
                     } finally {
                         callback.failed(error.getCause() instanceof CancellationException ? error.getCause() : error);
@@ -972,13 +1038,13 @@ public class JerseyInvocation implements javax.ws.rs.client.Invocation {
             //noinspection ChainOfInstanceofChecks
             if (error instanceof ProcessingException) {
                 ce = (ProcessingException) error;
-                responseFuture.setException(ce);
+                responseFuture.completeExceptionally(ce);
             } else if (error instanceof WebApplicationException) {
                 ce = new ProcessingException(error);
-                responseFuture.setException(error);
+                responseFuture.completeExceptionally(error);
             } else {
                 ce = new ProcessingException(error);
-                responseFuture.setException(ce);
+                responseFuture.completeExceptionally(ce);
             }
             callback.failed(ce);
         }

@@ -1,7 +1,7 @@
 /*
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
- * Copyright (c) 2012-2016 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012-2017 Oracle and/or its affiliates. All rights reserved.
  *
  * The contents of this file are subject to the terms of either the GNU
  * General Public License Version 2 only ("GPL") or the Common Development
@@ -57,6 +57,7 @@ import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 import javax.ws.rs.RuntimeType;
 import javax.ws.rs.core.Form;
@@ -78,6 +79,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.glassfish.jersey.internal.ServiceFinderBinder;
 import org.glassfish.jersey.internal.inject.Providers;
 import org.glassfish.jersey.internal.inject.ReferencingFactory;
+import org.glassfish.jersey.internal.inject.SupplierFactory;
 import org.glassfish.jersey.internal.util.ReflectionHelper;
 import org.glassfish.jersey.internal.util.collection.Ref;
 import org.glassfish.jersey.internal.util.collection.Value;
@@ -106,13 +108,9 @@ import org.glassfish.jersey.servlet.spi.AsyncContextDelegateProvider;
 import org.glassfish.jersey.servlet.spi.FilterUrlMappingsProvider;
 import org.glassfish.jersey.uri.UriComponent;
 
-import org.glassfish.hk2.api.Factory;
 import org.glassfish.hk2.api.ServiceLocator;
 import org.glassfish.hk2.api.TypeLiteral;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
-
-import jersey.repackaged.com.google.common.base.Predicate;
-import jersey.repackaged.com.google.common.collect.Collections2;
 
 /**
  * An common Jersey web component that may be extended by a Servlet and/or
@@ -235,30 +233,21 @@ public class WebComponent {
                         .to(new TypeLiteral<Ref<HttpServletResponse>>() {}).in(RequestScoped.class);
             }
 
-            bindFactory(new Factory<ServletContext>() {
+            bindFactory(new SupplierFactory<ServletContext>() {
                 @Override
                 public ServletContext provide() {
                     return webConfig.getServletContext();
-                }
-
-                @Override
-                public void dispose(final ServletContext instance) {
-                    //not used
                 }
             }).to(ServletContext.class).in(Singleton.class);
 
             final ServletConfig servletConfig = webConfig.getServletConfig();
             if (webConfig.getConfigType() == WebConfig.ConfigType.ServletConfig) {
-                bindFactory(new Factory<ServletConfig>() {
+                bindFactory(new SupplierFactory<ServletConfig>() {
                     @Override
                     public ServletConfig provide() {
                         return servletConfig;
                     }
 
-                    @Override
-                    public void dispose(final ServletConfig instance) {
-                        //not used
-                    }
                 }).to(ServletConfig.class).in(Singleton.class);
 
                 // @PersistenceUnit
@@ -272,29 +261,21 @@ public class WebComponent {
                     }
                 }
             } else {
-                bindFactory(new Factory<FilterConfig>() {
+                bindFactory(new SupplierFactory<FilterConfig>() {
                     @Override
                     public FilterConfig provide() {
                         return webConfig.getFilterConfig();
                     }
 
-                    @Override
-                    public void dispose(final FilterConfig instance) {
-                        //not used
-                    }
                 }).to(FilterConfig.class).in(Singleton.class);
             }
 
-            bindFactory(new Factory<WebConfig>() {
+            bindFactory(new SupplierFactory<WebConfig>() {
                 @Override
                 public WebConfig provide() {
                     return webConfig;
                 }
 
-                @Override
-                public void dispose(final WebConfig instance) {
-                    //not used
-                }
             }).to(WebConfig.class).in(Singleton.class);
 
             install(new ServiceFinderBinder<>(AsyncContextDelegateProvider.class, applicationProperties, RuntimeType.SERVER));
@@ -713,13 +694,9 @@ public class WebComponent {
      * @return list of form param values for given name without values of query param of the same name.
      */
     private List<String> filterQueryParams(final String name, final List<String> values, final Collection<String> params) {
-        return new ArrayList<>(Collections2.filter(values, new Predicate<String>() {
-            @Override
-            public boolean apply(final String input) {
-                return !params.remove(name + "=" + input)
-                        && !params.remove(name + "[]=" + input);
-            }
-        }));
+        return values.stream()
+                     .filter(s -> !params.remove(name + "=" + s) && !params.remove(name + "[]=" + s))
+                     .collect(Collectors.toList());
     }
 
     /**
